@@ -2,6 +2,8 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import { GetCommitmentSignature } from "@magicblock-labs/ephemeral-rollups-sdk";
+import { init, taskKey, taskQueueAuthorityKey } from "@helium/tuktuk-sdk";
+import { assert } from "chai";
 import { ErStateAccount } from "../target/types/er_state_account";
 
 describe("er-state-account", () => {
@@ -96,6 +98,60 @@ describe("er-state-account", () => {
       })
       .rpc();
     console.log("\nUser Account State Updated: ", tx);
+  });
+
+  it("Runs TukTuk scheduled update endpoint directly!", async () => {
+    const previousData = await fetchUserData(program);
+    const tx = await program.methods
+      .scheduledUpdate()
+      .accountsPartial({
+        userAccount: userAccount,
+      })
+      .rpc({ skipPreflight: true });
+    const currentData = await fetchUserData(program);
+
+    assert.equal(
+      currentData.toString(),
+      previousData.add(new anchor.BN(1)).toString()
+    );
+    console.log("\nTukTuk scheduled endpoint executed: ", tx);
+  });
+
+  it("Schedules a TukTuk one-off update task!", async function () {
+    const taskQueueEnv = process.env.TUKTUK_TASK_QUEUE;
+
+    if (!taskQueueEnv) {
+      console.log("Skipping live TukTuk schedule test: set TUKTUK_TASK_QUEUE");
+      this.skip();
+    }
+
+    const tuktukProgram = await init(provider);
+    const taskQueue = new PublicKey(taskQueueEnv);
+    const queueAuthority = PublicKey.findProgramAddressSync(
+      [Buffer.from("queue_authority")],
+      program.programId
+    )[0];
+    const taskId = Math.floor(Date.now() / 1000) % 65535;
+    const taskQueueAuthority = taskQueueAuthorityKey(
+      taskQueue,
+      queueAuthority
+    )[0];
+
+    const tx = await program.methods
+      .scheduleTuktukUpdate(taskId)
+      .accountsPartial({
+        payer: provider.publicKey,
+        userAccount: userAccount,
+        taskQueue: taskQueue,
+        taskQueueAuthority: taskQueueAuthority,
+        task: taskKey(taskQueue, taskId)[0],
+        queueAuthority: queueAuthority,
+        systemProgram: anchor.web3.SystemProgram.programId,
+        tuktukProgram: tuktukProgram.programId,
+      })
+      .rpc({ skipPreflight: true });
+
+    console.log("\nTukTuk update task scheduled: ", tx);
   });
 
   it("Request VRF Outside the ER!", async () => {

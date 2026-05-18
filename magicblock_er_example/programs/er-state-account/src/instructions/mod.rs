@@ -21,3 +21,9 @@ pub use request_random_update::*;
 
 pub mod consume_random_update;
 pub use consume_random_update::*;
+
+pub mod scheduled_update;
+pub use scheduled_update::*;
+
+pub mod schedule_tuktuk_update;
+pub use schedule_tuktuk_update::*;

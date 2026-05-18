@@ -59,6 +59,21 @@ pub mod er_state_account {
         Ok(())
     }
 
+    pub fn scheduled_update(ctx: Context<ScheduledUpdate>) -> Result<()> {
+        ctx.accounts.scheduled_update()?;
+
+        Ok(())
+    }
+
+    pub fn schedule_tuktuk_update(
+        ctx: Context<ScheduleTuktukUpdate>,
+        task_id: u16,
+    ) -> Result<()> {
+        ctx.accounts.schedule_tuktuk_update(task_id, ctx.bumps)?;
+
+        Ok(())
+    }
+
     pub fn delegate(ctx: Context<Delegate>) -> Result<()> {
         ctx.accounts.delegate()?;
 

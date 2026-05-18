@@ -27,16 +27,9 @@ pub struct InitializeExtraAccountMetaList<'info> {
 impl<'info> InitializeExtraAccountMetaList<'info> {
     pub fn extra_account_metas() -> Result<Vec<ExtraAccountMeta>> {
         Ok(vec![ExtraAccountMeta::new_with_seeds(
-            &[
-                Seed::Literal {
-                    bytes: b"whitelist".to_vec(),
-                },
-                Seed::AccountData {
-                    account_index: 0,
-                    data_index: 32,
-                    length: 32,
-                },
-            ],
+            &[Seed::Literal {
+                bytes: b"vault".to_vec(),
+            }],
             false,
             false,
         )

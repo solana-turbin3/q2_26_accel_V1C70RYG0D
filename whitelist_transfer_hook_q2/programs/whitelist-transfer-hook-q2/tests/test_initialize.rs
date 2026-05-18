@@ -4,7 +4,6 @@ use {
             self,
             instruction::{AccountMeta, Instruction},
             pubkey::Pubkey,
-            system_instruction,
         },
         InstructionData, ToAccountMetas,
     },
@@ -15,16 +14,22 @@ use {
     solana_transaction::versioned::VersionedTransaction,
     spl_associated_token_account_interface::{
         address::get_associated_token_address_with_program_id,
-        instruction::create_associated_token_account,
+        instruction::create_associated_token_account, program::ID as ASSOCIATED_TOKEN_PROGRAM_ID,
     },
     spl_token_2022_interface::{
-        extension::{transfer_hook::instruction::initialize as init_transfer_hook, ExtensionType},
-        instruction::{initialize_mint2, mint_to, transfer_checked},
-        state::Mint,
+        extension::{
+            permanent_delegate::get_permanent_delegate, BaseStateWithExtensions, ExtensionType,
+            StateWithExtensions,
+        },
+        instruction::transfer_checked,
+        state::{Account as TokenAccountState, Mint},
         ID as TOKEN_2022_ID,
     },
     whitelist_transfer_hook_q2 as program,
 };
+
+const DECIMALS: u8 = 9;
+const TOKEN: u64 = 1_000_000_000;
 
 fn send(
     svm: &mut LiteSVM,
@@ -39,218 +44,289 @@ fn send(
     svm.send_transaction(tx)
 }
 
+fn token_amount(svm: &LiteSVM, token_account: &Pubkey) -> u64 {
+    let account = svm
+        .get_account(token_account)
+        .expect("token account exists");
+    StateWithExtensions::<TokenAccountState>::unpack(&account.data)
+        .unwrap()
+        .base
+        .amount
+}
+
+fn build_transfer_ix(
+    source: &Pubkey,
+    mint: &Pubkey,
+    destination: &Pubkey,
+    authority: &Pubkey,
+    amount: u64,
+    extra_account_meta_list: &Pubkey,
+    vault: &Pubkey,
+    hook_program: &Pubkey,
+) -> Instruction {
+    let mut ix = transfer_checked(
+        &TOKEN_2022_ID,
+        source,
+        mint,
+        destination,
+        authority,
+        &[],
+        amount,
+        DECIMALS,
+    )
+    .unwrap();
+
+    ix.accounts
+        .push(AccountMeta::new_readonly(*extra_account_meta_list, false));
+    ix.accounts.push(AccountMeta::new_readonly(*vault, false));
+    ix.accounts
+        .push(AccountMeta::new_readonly(*hook_program, false));
+
+    ix
+}
+
 #[test]
 fn test_full_flow() {
     let mut svm = LiteSVM::new();
-    let payer = Keypair::new();
-    let recipient = Keypair::new();
+    let admin = Keypair::new();
+    let user = Keypair::new();
+    let blocked_user = Keypair::new();
 
     let program_id = program::id();
     let bytes = include_bytes!("../../../target/deploy/whitelist_transfer_hook_q2.so");
     svm.add_program(program_id, bytes).unwrap();
-    svm.airdrop(&payer.pubkey(), 10_000_000_000).unwrap();
+    svm.airdrop(&admin.pubkey(), 10_000_000_000).unwrap();
 
-    let (whitelist_config_pda, _) = Pubkey::find_program_address(&[b"whitelist"], &program_id);
-    let (payer_whitelist_pda, _) =
-        Pubkey::find_program_address(&[b"whitelist", payer.pubkey().as_ref()], &program_id);
+    let (vault_pda, _) = Pubkey::find_program_address(&[b"vault"], &program_id);
+    let (mint_pda, _) = Pubkey::find_program_address(&[b"mint"], &program_id);
+    let (extra_meta_pda, _) =
+        Pubkey::find_program_address(&[b"extra-account-metas", mint_pda.as_ref()], &program_id);
+    let vault_ata =
+        get_associated_token_address_with_program_id(&vault_pda, &mint_pda, &TOKEN_2022_ID);
+    let user_ata =
+        get_associated_token_address_with_program_id(&user.pubkey(), &mint_pda, &TOKEN_2022_ID);
+    let blocked_user_ata = get_associated_token_address_with_program_id(
+        &blocked_user.pubkey(),
+        &mint_pda,
+        &TOKEN_2022_ID,
+    );
     let system_program_id = solana_program::system_program::id();
 
-    // Step 1: Initialize whitelist
     let ix = Instruction::new_with_bytes(
         program_id,
-        &program::instruction::InitializeWhitelist {}.data(),
-        program::accounts::InitializeWhitelist {
-            admin: payer.pubkey(),
-            whitelist: whitelist_config_pda,
+        &program::instruction::InitializeVault {}.data(),
+        program::accounts::InitializeVault {
+            admin: admin.pubkey(),
+            vault: vault_pda,
+            mint: mint_pda,
+            vault_token_account: vault_ata,
+            extra_account_meta_list: extra_meta_pda,
+            token_program: TOKEN_2022_ID,
+            associated_token_program: ASSOCIATED_TOKEN_PROGRAM_ID,
             system_program: system_program_id,
         }
         .to_account_metas(None),
     );
-    send(&mut svm, &[ix], &payer, &[&payer]).expect("initialize_whitelist failed");
+    send(&mut svm, &[ix], &admin, &[&admin]).expect("initialize_vault failed");
 
-    // Step 2: Add user (payer) to whitelist by creating the payer-specific PDA
+    let mint_account = svm.get_account(&mint_pda).expect("mint exists");
+    let mint_state = StateWithExtensions::<Mint>::unpack(&mint_account.data).unwrap();
+    let extension_types = mint_state.get_extension_types().unwrap();
+    assert!(extension_types.contains(&ExtensionType::TransferHook));
+    assert!(extension_types.contains(&ExtensionType::PermanentDelegate));
+    assert_eq!(get_permanent_delegate(&mint_state), Some(admin.pubkey()));
+
+    let create_user_ata =
+        create_associated_token_account(&admin.pubkey(), &user.pubkey(), &mint_pda, &TOKEN_2022_ID);
+    let create_blocked_user_ata = create_associated_token_account(
+        &admin.pubkey(),
+        &blocked_user.pubkey(),
+        &mint_pda,
+        &TOKEN_2022_ID,
+    );
+    send(
+        &mut svm,
+        &[create_user_ata, create_blocked_user_ata],
+        &admin,
+        &[&admin],
+    )
+    .expect("create user token accounts failed");
+
+    let initial_amount = 100 * TOKEN;
+    let mint_to_user = Instruction::new_with_bytes(
+        program_id,
+        &program::instruction::MintTokens {
+            amount: initial_amount,
+        }
+        .data(),
+        program::accounts::MintTokens {
+            admin: admin.pubkey(),
+            vault: vault_pda,
+            mint: mint_pda,
+            recipient_token_account: user_ata,
+            recipient: user.pubkey(),
+            token_program: TOKEN_2022_ID,
+        }
+        .to_account_metas(None),
+    );
+    let mint_to_blocked_user = Instruction::new_with_bytes(
+        program_id,
+        &program::instruction::MintTokens {
+            amount: initial_amount,
+        }
+        .data(),
+        program::accounts::MintTokens {
+            admin: admin.pubkey(),
+            vault: vault_pda,
+            mint: mint_pda,
+            recipient_token_account: blocked_user_ata,
+            recipient: blocked_user.pubkey(),
+            token_program: TOKEN_2022_ID,
+        }
+        .to_account_metas(None),
+    );
+    send(
+        &mut svm,
+        &[mint_to_user, mint_to_blocked_user],
+        &admin,
+        &[&admin],
+    )
+    .expect("program mint failed");
+    assert_eq!(token_amount(&svm, &user_ata), initial_amount);
+    assert_eq!(token_amount(&svm, &blocked_user_ata), initial_amount);
+
+    let blocked_deposit = build_transfer_ix(
+        &blocked_user_ata,
+        &mint_pda,
+        &vault_ata,
+        &blocked_user.pubkey(),
+        TOKEN,
+        &extra_meta_pda,
+        &vault_pda,
+        &program_id,
+    );
+    assert!(
+        send(
+            &mut svm,
+            &[blocked_deposit],
+            &admin,
+            &[&admin, &blocked_user]
+        )
+        .is_err(),
+        "non-whitelisted deposits must fail"
+    );
+
+    let allowance = 50 * TOKEN;
     let ix = Instruction::new_with_bytes(
         program_id,
         &program::instruction::AddToWhitelist {
-            user: payer.pubkey(),
+            user: user.pubkey(),
+            amount: allowance,
         }
         .data(),
         program::accounts::AddToWhitelist {
-            admin: payer.pubkey(),
-            whitelist_config: whitelist_config_pda,
-            whitelist: payer_whitelist_pda,
-            system_program: system_program_id,
+            admin: admin.pubkey(),
+            vault: vault_pda,
         }
         .to_account_metas(None),
     );
-    send(&mut svm, &[ix], &payer, &[&payer]).expect("add_to_whitelist failed");
+    send(&mut svm, &[ix], &admin, &[&admin]).expect("add_to_whitelist failed");
+
+    let too_large_deposit = build_transfer_ix(
+        &user_ata,
+        &mint_pda,
+        &vault_ata,
+        &user.pubkey(),
+        allowance + TOKEN,
+        &extra_meta_pda,
+        &vault_pda,
+        &program_id,
+    );
     assert!(
-        svm.get_account(&payer_whitelist_pda).is_some(),
-        "add_to_whitelist should create the payer whitelist PDA"
+        send(&mut svm, &[too_large_deposit], &admin, &[&admin, &user]).is_err(),
+        "deposits above the whitelist amount must fail"
     );
 
-    // Step 3: Remove user from whitelist by closing the payer-specific PDA
+    let deposit_amount = 40 * TOKEN;
+    let deposit = build_transfer_ix(
+        &user_ata,
+        &mint_pda,
+        &vault_ata,
+        &user.pubkey(),
+        deposit_amount,
+        &extra_meta_pda,
+        &vault_pda,
+        &program_id,
+    );
+    send(&mut svm, &[deposit], &admin, &[&admin, &user]).expect("deposit failed");
+    assert_eq!(
+        token_amount(&svm, &user_ata),
+        initial_amount - deposit_amount
+    );
+    assert_eq!(token_amount(&svm, &vault_ata), deposit_amount);
+
     let ix = Instruction::new_with_bytes(
         program_id,
         &program::instruction::RemoveFromWhitelist {
-            user: payer.pubkey(),
+            user: user.pubkey(),
         }
         .data(),
         program::accounts::RemoveFromWhitelist {
-            admin: payer.pubkey(),
-            whitelist_config: whitelist_config_pda,
-            whitelist: payer_whitelist_pda,
+            admin: admin.pubkey(),
+            vault: vault_pda,
         }
         .to_account_metas(None),
     );
-    send(&mut svm, &[ix], &payer, &[&payer]).expect("remove_from_whitelist failed");
-    assert!(
-        svm.get_account(&payer_whitelist_pda).is_none(),
-        "remove_from_whitelist should close the payer whitelist PDA"
-    );
+    send(&mut svm, &[ix], &admin, &[&admin]).expect("remove_from_whitelist failed");
 
-    // Step 4: Create mint with TransferHook extension
-    let mint = Keypair::new();
-    let mint_size =
-        ExtensionType::try_calculate_account_len::<Mint>(&[ExtensionType::TransferHook]).unwrap();
-    let mint_rent = svm.minimum_balance_for_rent_exemption(mint_size);
-
-    let create_mint_acct = system_instruction::create_account(
-        &payer.pubkey(),
-        &mint.pubkey(),
-        mint_rent,
-        mint_size as u64,
-        &TOKEN_2022_ID,
-    );
-    let init_hook = init_transfer_hook(
-        &TOKEN_2022_ID,
-        &mint.pubkey(),
-        Some(payer.pubkey()),
-        Some(program_id),
-    )
-    .unwrap();
-    let init_mint =
-        initialize_mint2(&TOKEN_2022_ID, &mint.pubkey(), &payer.pubkey(), None, 9).unwrap();
-
-    send(
-        &mut svm,
-        &[create_mint_acct, init_hook, init_mint],
-        &payer,
-        &[&payer, &mint],
-    )
-    .expect("create mint with transfer hook failed");
-
-    // Step 5: Create source/destination ATAs and mint 100 tokens to source
-    let source_ata = get_associated_token_address_with_program_id(
-        &payer.pubkey(),
-        &mint.pubkey(),
-        &TOKEN_2022_ID,
-    );
-    let dest_ata = get_associated_token_address_with_program_id(
-        &recipient.pubkey(),
-        &mint.pubkey(),
-        &TOKEN_2022_ID,
-    );
-
-    let create_source_ata = create_associated_token_account(
-        &payer.pubkey(),
-        &payer.pubkey(),
-        &mint.pubkey(),
-        &TOKEN_2022_ID,
-    );
-    let create_dest_ata = create_associated_token_account(
-        &payer.pubkey(),
-        &recipient.pubkey(),
-        &mint.pubkey(),
-        &TOKEN_2022_ID,
-    );
-    let mint_amount = 100u64 * 10u64.pow(9);
-    let mint_to_ix = mint_to(
-        &TOKEN_2022_ID,
-        &mint.pubkey(),
-        &source_ata,
-        &payer.pubkey(),
-        &[],
-        mint_amount,
-    )
-    .unwrap();
-
-    send(
-        &mut svm,
-        &[create_source_ata, create_dest_ata, mint_to_ix],
-        &payer,
-        &[&payer],
-    )
-    .expect("create ATAs and mint_to failed");
-
-    // Step 6: Initialize ExtraAccountMetaList for the transfer hook
-    let (extra_meta_pda, _) = Pubkey::find_program_address(
-        &[b"extra-account-metas", mint.pubkey().as_ref()],
+    let withdraw_amount = 10 * TOKEN;
+    let withdraw_while_removed = build_transfer_ix(
+        &vault_ata,
+        &mint_pda,
+        &user_ata,
+        &admin.pubkey(),
+        withdraw_amount,
+        &extra_meta_pda,
+        &vault_pda,
         &program_id,
     );
-
-    let ix = Instruction::new_with_bytes(
-        program_id,
-        &program::instruction::InitializeTransferHook {}.data(),
-        program::accounts::InitializeExtraAccountMetaList {
-            payer: payer.pubkey(),
-            extra_account_meta_list: extra_meta_pda,
-            mint: mint.pubkey(),
-            system_program: system_program_id,
-        }
-        .to_account_metas(None),
-    );
-    send(&mut svm, &[ix], &payer, &[&payer]).expect("initialize_transfer_hook failed");
-
-    let transfer_amount = 1u64 * 10u64.pow(9);
-    let build_transfer_ix = |source: &Keypair, mint_kp: &Keypair, src: Pubkey, dst: Pubkey| {
-        let mut ix = transfer_checked(
-            &TOKEN_2022_ID,
-            &src,
-            &mint_kp.pubkey(),
-            &dst,
-            &source.pubkey(),
-            &[],
-            transfer_amount,
-            9,
-        )
-        .unwrap();
-        // Order: extra_account_meta_list, then TLV-registered extras (payer whitelist PDA), then hook program ID.
-        ix.accounts
-            .push(AccountMeta::new_readonly(extra_meta_pda, false));
-        ix.accounts
-            .push(AccountMeta::new_readonly(payer_whitelist_pda, false));
-        ix.accounts
-            .push(AccountMeta::new_readonly(program_id, false));
-        ix
-    };
-
-    // Step 7a: Transfer should fail — payer was removed from the whitelist
-    let transfer_fail_ix = build_transfer_ix(&payer, &mint, source_ata, dest_ata);
-    let res = send(&mut svm, &[transfer_fail_ix], &payer, &[&payer]);
     assert!(
-        res.is_err(),
-        "transfer should fail — payer is not whitelisted"
+        send(&mut svm, &[withdraw_while_removed], &admin, &[&admin]).is_err(),
+        "withdrawals after whitelist removal must fail"
     );
 
-    // Step 7b: Re-add payer to whitelist, then the transfer should succeed
     let ix = Instruction::new_with_bytes(
         program_id,
         &program::instruction::AddToWhitelist {
-            user: payer.pubkey(),
+            user: user.pubkey(),
+            amount: allowance,
         }
         .data(),
         program::accounts::AddToWhitelist {
-            admin: payer.pubkey(),
-            whitelist_config: whitelist_config_pda,
-            whitelist: payer_whitelist_pda,
-            system_program: system_program_id,
+            admin: admin.pubkey(),
+            vault: vault_pda,
         }
         .to_account_metas(None),
     );
-    send(&mut svm, &[ix], &payer, &[&payer]).expect("re-add_to_whitelist failed");
+    send(&mut svm, &[ix], &admin, &[&admin]).expect("re-add_to_whitelist failed");
 
-    let transfer_ok_ix = build_transfer_ix(&payer, &mint, source_ata, dest_ata);
-    send(&mut svm, &[transfer_ok_ix], &payer, &[&payer])
-        .expect("transfer should succeed — payer re-added to whitelist");
+    let withdraw = build_transfer_ix(
+        &vault_ata,
+        &mint_pda,
+        &user_ata,
+        &admin.pubkey(),
+        withdraw_amount,
+        &extra_meta_pda,
+        &vault_pda,
+        &program_id,
+    );
+    send(&mut svm, &[withdraw], &admin, &[&admin]).expect("withdraw failed");
+    assert_eq!(
+        token_amount(&svm, &user_ata),
+        initial_amount - deposit_amount + withdraw_amount
+    );
+    assert_eq!(
+        token_amount(&svm, &vault_ata),
+        deposit_amount - withdraw_amount
+    );
 }

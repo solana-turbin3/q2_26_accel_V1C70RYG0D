@@ -18,17 +18,20 @@ declare_id!("EUkbfr6mqkXx4XFAdFaRQP79kw4ibQbEZwjmxUUkQxao");
 pub mod whitelist_transfer_hook_q2 {
     use super::*;
 
-    pub fn initialize_whitelist(ctx: Context<InitializeWhitelist>) -> Result<()> {
-        ctx.accounts.initialize_whitelist(ctx.bumps)
+    pub fn initialize_vault(ctx: Context<InitializeVault>) -> Result<()> {
+        ctx.accounts.initialize_vault(ctx.bumps)
     }
 
-    pub fn add_to_whitelist(ctx: Context<AddToWhitelist>, user: Pubkey) -> Result<()> {
-        ctx.accounts.add_to_whitelist(user, ctx.bumps)
+    pub fn add_to_whitelist(ctx: Context<AddToWhitelist>, user: Pubkey, amount: u64) -> Result<()> {
+        ctx.accounts.add_to_whitelist(user, amount)
     }
 
     pub fn remove_from_whitelist(ctx: Context<RemoveFromWhitelist>, user: Pubkey) -> Result<()> {
-        let _ = user;
-        ctx.accounts.remove_from_whitelist()
+        ctx.accounts.remove_from_whitelist(user)
+    }
+
+    pub fn mint_tokens(ctx: Context<MintTokens>, amount: u64) -> Result<()> {
+        ctx.accounts.mint_tokens(amount)
     }
 
     pub fn initialize_transfer_hook(ctx: Context<InitializeExtraAccountMetaList>) -> Result<()> {

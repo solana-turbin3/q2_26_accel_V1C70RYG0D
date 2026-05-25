@@ -1,0 +1,28 @@
+[package]
+name = "solana-gpt-oracle-scheduler"
+version = "0.1.0"
+description = "TukTuk-scheduled MagicBlock GPT Oracle integration"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "solana_gpt_oracle_scheduler"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+tuktuk-program = { git = "https://github.com/AvhiMaz/tuktuk", branch = "chore/bump-versions", package = "tuktuk-program" }
+solana-gpt-oracle = { git = "https://github.com/magicblock-labs/super-smart-contracts", features = ["cpi"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

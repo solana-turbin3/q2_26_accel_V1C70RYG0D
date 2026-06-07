@@ -7,6 +7,7 @@ skip-lint = false
 
 [programs.localnet]
 anchor_escrow_q2_2026 = "DfYWchGLtTmd1aVvQkL2Rpvz7SnvKN8dBhzDFhaj3MBm"
+anchor_core_staking = "9L2bGXYSc8mZBAfnnVf2cavGCns4dvqwojYHuDkp12C1"
 
 [provider]
 cluster = "localnet"

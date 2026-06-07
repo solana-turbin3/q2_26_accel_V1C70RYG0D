@@ -6,7 +6,11 @@
   },
   "dependencies": {
     "@anchor-lang/core": "^1.0.0",
-    "@solana/spl-token": "^0.4.14"
+    "@coral-xyz/anchor": "^0.31.1",
+    "@metaplex-foundation/mpl-core": "^1.4.1",
+    "@metaplex-foundation/umi-bundle-defaults": "^1.5.1",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.2"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.0",
